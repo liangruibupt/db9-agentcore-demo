@@ -8,6 +8,8 @@
 - **Demo 08 Agent 评测 / 强化学习环境**：每个 episode 一个全新的店铺世界，Agent 真实执行写操作，用 SQL 检查最终状态（`scripts/08_eval_rl_env.py`）。
 - **Demo 06 一次性分析沙箱**：原始 CSV / JSONL 不建表直接用 SQL 查（`scripts/06_analyst_sandbox.py`）。
 
+Agent 已实际部署到 AgentCore Runtime，并有一个端到端集成测试（`scripts/09_agentcore_e2e.py`，22/22 通过），见「部署到 AgentCore Runtime」一节。01–05 是 db9 基础能力的逐步演示，见「Demo 01–05」一节。
+
 db9 调研报告（是什么、开源与否、与 Aurora / DynamoDB 的对比、竞品）：[docs/research.md](docs/research.md)
 
 ```
@@ -25,6 +27,18 @@ db9 调研报告（是什么、开源与否、与 Aurora / DynamoDB 的对比、
                  │ fs9   : /config/store.json /kb/*.md /memories/ /sessions/ /runs/ │
                  └────────────────┘ └────────────────┘ └────────────────┘
 ```
+
+## Demo 01–05：基础能力（同一个客服 Copilot，一步步看 db9 能做什么）
+
+这五个脚本是顺序的：01 先把第一家店 Nimbus Gear 搭进默认库，后面每个脚本在这个环境上展示 db9 的一项能力。06–08 才是「深挖」之后的场景 demo。
+
+| 脚本 | 场景 | 展示的 db9 能力 | 实测 |
+|---|---|---|---|
+| `01_bootstrap.py` | 第一家店开张：建表、导入订单，品牌配置和 KB 文档放进 fs9 | **一条 SQL 完成 RAG 入库**：列 fs9 目录 → 读文件 → `CHUNK_TEXT` 切块 → `embedding()` → 写向量表，不需要 S3、Lambda 或向量化流水线 | 整个 provision 约 8 秒 |
+| `02_agent_chat.py` | 顾客 alice 在会话 1 问用过的帐篷能不能退，顺便说自己是会员、习惯西雅图自提柜；换一个聊天记录为空的会话 2，Agent 仍然记得 | **一个库装下 Agent 的全部状态**：长期记忆进表（带向量）+ 原文进文件，会话快照是 `/sessions/<sid>/messages.json`，每次工具调用追加到 JSONL 轨迹；最后不建表直接用 SQL 汇总轨迹 | 新会话通过 `recall` 拿回会员身份，给出会员专属的 60 天退货期 |
+| `03_branch_sandbox.py` | 运维 Agent 想做破坏性实验：用更小的切块重建 KB、删旧记忆。先分支整个环境，在分支上改、对比，再丢掉 | **分支连表带文件一起复制**，是 Agent 的天然沙箱 | 检索距离 0.54 → 0.38，生产库不变；分支是全量复制，小库也要约 60 秒 |
+| `04_saas_multi_store.py` | 再入驻两家店，同一套 Agent 代码按 `store_id` 路由；一家店退订 | **一店一库**：秒级建库、凭证隔离、删库即删净（详见下一节） | 入驻约 20 秒；跨店登录被拒；退订后请求 fail closed |
+| `05_bedrock_embeddings.py` | 合规要求向量化必须在自己的 AWS 账号里做 | **自带向量**：Bedrock Titan v2 生成向量，db9 只当 pgvector 兼容的存储和 HNSW 检索 | 与 db9 内置 `embedding()` 结果一致（最大余弦距离 4e-7） |
 
 ## 场景：客服 Copilot 卖给很多家店
 
@@ -181,7 +195,7 @@ for each task (并行 4 个):
 | 8 | **一次性分析沙箱**：每个问题一个库，SQL 直接查原始文件，Agent 拥有完整权限 | `scripts/06_analyst_sandbox.py` |
 | 9 | **一应用一库的应用生成平台**：Agent 建 schema / 触发器 / API，源码存进同一个库，分支迭代 + 兼容性门禁 + 上线 | `scripts/07_app_builder.py`、`db9_agent/provision.py` |
 | 10 | **一 episode 一库的评测 / RL 环境**：并行重置世界、真实写操作、SQL 打分、评测历史存 JSONL 用 SQL 汇总 | `scripts/08_eval_rl_env.py`、`db9_agent/actions.py` |
-| 11 | **AgentCore Runtime 契约**：`/ping` + `/invocations`，从 AgentCore 的 session header 取 session id，DSN 从 Secrets Manager 读取 | `agentcore_app.py`、`db9_agent/db.py` |
+| 11 | **跑在 AgentCore Runtime 上**：`/ping` + `/invocations`，session id 取自 AgentCore，每家店的 DSN 从 Secrets Manager 读取；部署脚本 + 端到端集成测试 | `agentcore_app.py`、`deploy/deploy_agentcore.py`、`scripts/09_agentcore_e2e.py` |
 
 ## 运行（本地）
 
@@ -213,25 +227,46 @@ curl -s localhost:8080/invocations -H 'Content-Type: application/json' \
   -d '{"prompt":"我的睡袋订单什么时候发货？保修多久？","user_id":"u-bob","store_id":"nimbus-gear"}'
 ```
 
-## 部署到 AgentCore Runtime
+## 部署到 AgentCore Runtime（已实测）
+
+`deploy/deploy_agentcore.py` 用 boto3 直接调用 AgentCore 控制面，走 **direct code deploy**（代码 zip 放 S3，托管 Python 3.12 运行时），不需要 Docker、ECR 或 CodeBuild。脚本是幂等的：改了代码再跑一次就原地更新同一个 runtime，生成新版本。
 
 ```bash
-# 默认店的 DSN 放进 Secrets Manager，不放进镜像或环境变量
-aws secretsmanager create-secret --name db9/agentcore-demo --region us-west-2 \
-  --secret-string "$(grep ^DB9_DATABASE_URL .env | cut -d= -f2-)"
-# 其他店：每店一个 secret，名字 = 前缀 + store_id
-aws secretsmanager create-secret --name db9/tenants/peak-cycles --region us-west-2 \
-  --secret-string "$(jq -r '."peak-cycles".dsn' .tenants.json)"
-
-.venv/bin/agentcore configure -e agentcore_app.py -r us-west-2 \
-  --requirements-file requirements.txt --disable-memory --non-interactive
-.venv/bin/agentcore launch --env DB9_SECRET_ARN=<secret-arn> \
-  --env DB9_TENANT_SECRET_PREFIX=db9/tenants/ --env BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-6
-# 给 toolkit 生成的执行角色加 secretsmanager:GetSecretValue（只授权 db9/agentcore-demo* 和 db9/tenants/*）
-.venv/bin/agentcore invoke '{"prompt":"Can I return a bike I rode once?","user_id":"u-alice","store_id":"peak-cycles"}'
+.venv/bin/python scripts/04_saas_multi_store.py --keep   # 先保留一家额外的店（peak-cycles），用来测多租户路由
+.venv/bin/python deploy/deploy_agentcore.py              # 约 30 秒（首次多 15 秒等 IAM 生效）
+.venv/bin/python scripts/09_agentcore_e2e.py             # 端到端集成测试，约 70 秒
+.venv/bin/python deploy/destroy_agentcore.py --yes       # 用完拆掉（不删 db9 库）
 ```
 
-AgentCore 容器需要能访问公网：db9 是公网端点（`pg.d0000.db9.io:5432`，TLS），目前没有 PrivateLink / VPC 私有接入。
+部署脚本在你的账号里创建这些资源（都带 `project=db9-agentcore-demo` 标签）：
+
+| 资源 | 名字 | 作用 |
+|---|---|---|
+| Secrets Manager | `db9/agentcore-demo`、`db9/tenants/<store_id>` | 每家店的 db9 DSN。代码包和 runtime 配置里都没有凭证，只有 secret ARN 和前缀 |
+| IAM 角色 | `db9-agentcore-demo-runtime` | 只信任 `bedrock-agentcore`；权限：调用 Bedrock 模型、写 CloudWatch Logs / X-Ray、只能读 `db9/*` 这几个 secret |
+| S3 桶 | `db9-agentcore-demo-<account>-<region>` | 代码 zip（约 37 MB），禁止公开访问 |
+| AgentCore Runtime | `db9_agentcore_demo` | HTTP 协议，PUBLIC 网络模式 |
+
+两个部署时踩到的点：
+- AgentCore 运行在 Linux ARM64 上，依赖要按 `aarch64` 交叉安装。`psycopg-binary` 3.3 没有 `manylinux2014_aarch64` 的 wheel，要用 `aarch64-manylinux_2_28`，按 `manylinux2014` 解析会失败。
+- 网络模式必须是 PUBLIC：db9 只有公网 TLS 端点（`pg.d0000.db9.io:5432`），没有 PrivateLink / VPC 私有接入。如果要放进 VPC，得给子网配 NAT 出网。
+
+没有用 `bedrock-agentcore-starter-toolkit` 的 `agentcore launch`：这个 toolkit 已经提示停止维护、建议迁移到新的 `@aws/agentcore` CLI，而 boto3 脚本把要创建的每个资源都写得清清楚楚，方便审计和拆除。
+
+### 端到端集成测试：`scripts/09_agentcore_e2e.py`
+
+测试通过 AgentCore 数据面（`InvokeAgentRuntime`，SigV4）调用**已部署**的 runtime，再**直接连 db9** 检查 Agent 在托管 microVM 里做的事有没有落到正确的店库里。每次运行用一个随机测试用户，结束后删除它产生的所有行和文件，并停止用到的 runtime 会话。
+
+| # | 测什么 | 怎么验证 |
+|---|---|---|
+| T1 | runtime 就绪、凭证不在配置里 | 控制面状态 READY；环境变量里只有 `DB9_SECRET_ARN` / 前缀，没有 db9 连接串 |
+| T2 | 写入路径 | 会话 A 里顾客说出会员身份和自提偏好 → db9 里有一条 `agent_runs`（用 AgentCore 的 session id 做键）、带向量的 `memories` 行、`/memories/<user>/*.md` 文件、`/sessions/<sid>/messages.json` 快照，JSONL 轨迹是 start → 工具调用 → end |
+| T3 | 短期记忆 | 同一个 AgentCore 会话追问「我刚说的取货点是哪」→ 答出西雅图；fs9 里的会话快照变长 |
+| T4 | 长期记忆 | **新的** AgentCore 会话（新 microVM、空聊天记录）问用过的帐篷能退几天 → Agent 调了 `recall` 和 `search_knowledge`，答出只有会员才有的 60 天。会员身份只在会话 A 里说过，只能来自 db9 |
+| T5 | 租户路由 | 同一个用户问 Peak Cycles「骑过一次的车能退吗」→ 以 Peak Cycles 身份回答「不能退」，运行记录只写进 Peak Cycles 的库，Nimbus 的会员记忆不会出现 |
+| T6 | fail closed | 未入驻的店（没有 secret）和非法 `store_id`（`../nimbus-gear`）都返回 `rejected`，两个库里都没有写入 |
+
+实测（2026-10-09，us-west-2，runtime version 1）：**22/22 通过，约 70 秒**。单次调用墙钟 4–15 秒（含 Bedrock 推理和 3–4 次 db9 往返）；被拒请求 0.3–4 秒（查不到 secret 的那次多一次 Secrets Manager 往返）。
 
 ## 实测结果（2026-10-09，us-west-2）
 
@@ -243,6 +278,7 @@ AgentCore 容器需要能访问公网：db9 是公网端点（`pg.d0000.db9.io:5
 - 分析沙箱：建库约 10s，上传 5 个原始文件约 7s，Agent 约 3.5 分钟得出正确根因
 - 应用生成平台：建库 4–6s；两个应用并行构建 153–164s，接口 8/8、10/10 通过；分支迭代 + 兼容性门禁 + 上线全部通过
 - 评测环境：每个 episode 世界准备 18–33s；8 个 episode 4 并行墙钟 128s；pass@1 = 8/8（多轮用户模拟器）
+- AgentCore Runtime：direct code deploy 部署约 30 秒到 READY；端到端测试 22/22 通过，单次调用墙钟 4–15 秒
 - `embedding()` 与 Bedrock Titan v2 的向量一致（最大余弦距离 4e-7）
 
 ## 安全提示
