@@ -10,38 +10,30 @@ reports. The agent code is shared; the data never is.
                                   e.g. db9/tenants/peak-cycles  (raw DSN string)
     local demo                  : .tenants.json (gitignored, chmod 600)
 
-onboard()/offboard() drive the db9 CLI; a real control plane would call the db9
-REST API from its signup / cancellation workflow instead.
+onboard()/offboard() use db9_agent.provision (db9 CLI); a real control plane would call
+the db9 REST API from its signup / cancellation workflow instead.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import shutil
-import subprocess
 import time
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import quote, urlsplit, urlunsplit
 
 from .db import connect, database_url, provision_store
+from .provision import create_database, delete_database
 
 ROOT = Path(__file__).resolve().parents[1]
 STORES_DIR = ROOT / "stores"
 REGISTRY = ROOT / ".tenants.json"
 DEFAULT_STORE = "nimbus-gear"
-DB9 = shutil.which("db9") or os.path.expanduser("~/.local/bin/db9")
 _STORE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 
 
 class UnknownStore(LookupError):
     pass
-
-
-def _db9(*args: str) -> dict | list:
-    out = subprocess.run([DB9, *args, "--json"], check=True, capture_output=True, text=True).stdout
-    return json.loads(out) if out.strip() else {}
 
 
 def _load() -> dict:
@@ -81,14 +73,6 @@ def resolve(store_id: str | None) -> str:
     return entry["dsn"]
 
 
-def _with_password(conn_str: str, password: str) -> str:
-    u = urlsplit(conn_str)
-    user, host = u.netloc.split("@", 1)
-    user = user.split(":", 1)[0]
-    query = u.query or "sslmode=require"
-    return urlunsplit((u.scheme, f"{user}:{quote(password, safe='')}@{host}", u.path, query, ""))
-
-
 def onboard(store_id: str) -> dict:
     """Store signs up: create its database and provision KB + orders + config. ~ seconds, not minutes."""
     _check(store_id)
@@ -99,19 +83,14 @@ def onboard(store_id: str) -> dict:
     if store_id in reg:
         raise ValueError(f"store {store_id!r} already onboarded ({reg[store_id]['db_name']})")
 
-    t0 = time.time()
-    created = _db9("create", "--name", f"store-{store_id}", "--show-password")
-    password = next(v for k, v in created.items() if "password" in k and isinstance(v, str) and v)
-    dsn = _with_password(created["connection_string"], password)
-    t_create = time.time() - t0
-    reg[store_id] = {"db_name": created["name"], "db_id": created["id"], "dsn": dsn}
+    db = create_database(f"store-{store_id}")
+    reg[store_id] = {"db_name": db["name"], "db_id": db["id"], "dsn": db["dsn"]}
     _save(reg)
 
     t1 = time.time()
-    with connect(dsn) as c:
+    with connect(db["dsn"]) as c:
         stats = provision_store(c, store_dir)
-    return {**stats, "db_name": created["name"], "create_s": round(t_create, 1),
-            "provision_s": round(time.time() - t1, 1)}
+    return {**stats, "db_name": db["name"], "create_s": db["seconds"], "provision_s": round(time.time() - t1, 1)}
 
 
 def offboard(store_id: str) -> str:
@@ -120,7 +99,7 @@ def offboard(store_id: str) -> str:
     entry = reg.pop(_check(store_id), None)
     if not entry:
         raise UnknownStore(f"store {store_id!r} is not onboarded")
-    subprocess.run([DB9, "delete", entry["db_name"], "--yes"], check=True, capture_output=True)
+    delete_database(entry["db_name"])
     _save(reg)
     return entry["db_name"]
 

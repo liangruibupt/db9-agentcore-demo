@@ -47,8 +47,11 @@ def _save_messages(dsn: str, session_id: str, messages: list) -> None:
         c.execute("SELECT extensions.fs9_write(%s, %s)", (path, json.dumps(messages, ensure_ascii=False, default=str)))
 
 
-def handle(prompt: str, user_id: str, session_id: str, store_id: str | None = None) -> dict:
-    dsn = resolve(store_id)  # fails closed for unknown stores
+def handle(prompt: str, user_id: str, session_id: str, store_id: str | None = None, *,
+           dsn: str | None = None, extra_tools: tuple = (), extra_instructions: str = "") -> dict:
+    """One agent turn. `dsn` overrides tenant routing (used by the eval harness, where each
+    episode runs in its own throwaway copy of a store); `extra_tools` adds e.g. write actions."""
+    dsn = dsn or resolve(store_id)  # fails closed for unknown stores
     model_id = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
     run_id = new_run_id()
     tracer = Tracer(session_id, run_id, dsn)
@@ -64,8 +67,8 @@ def handle(prompt: str, user_id: str, session_id: str, store_id: str | None = No
     agent = Agent(
         model=BedrockModel(model_id=model_id, region_name=os.environ.get("AWS_REGION", "us-west-2")),
         system_prompt=SYSTEM_PROMPT.format(name=cfg["name"], blurb=cfg["blurb"], tone=cfg.get("tone", "helpful"))
-        + f"\nCurrent user_id: {user_id}",
-        tools=build_tools(user_id, tracer, dsn),
+        + extra_instructions + f"\nCurrent user_id: {user_id}",
+        tools=build_tools(user_id, tracer, dsn) + [t for make in extra_tools for t in make(user_id, dsn, tracer)],
         messages=_load_messages(dsn, session_id),
         callback_handler=None,
     )
