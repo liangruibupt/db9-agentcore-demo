@@ -1,7 +1,7 @@
 """Amazon Bedrock AgentCore Runtime entrypoint.
 
 Local:   python agentcore_app.py        (serves POST /invocations on :8080)
-Deploy:  agentcore configure -e agentcore_app.py && agentcore launch   (see README)
+Deploy:  python deploy/deploy_agentcore.py   (direct code deploy; test with scripts/09_agentcore_e2e.py)
 
 Payload: {"prompt": "...", "user_id": "u-alice", "store_id": "peak-cycles", "session_id": "optional"}
          (store_id omitted -> the default store, nimbus-gear)

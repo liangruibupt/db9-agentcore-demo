@@ -56,7 +56,11 @@ def _secret_dsn(secret_id: str) -> str:
     import boto3
 
     sm = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION"))
-    return sm.get_secret_value(SecretId=secret_id)["SecretString"]
+    try:
+        return sm.get_secret_value(SecretId=secret_id)["SecretString"]
+    except sm.exceptions.ResourceNotFoundException:
+        # no secret = store not onboarded; fail closed with the same error as local mode
+        raise UnknownStore(f"store {secret_id.rsplit('/', 1)[-1]!r} is not onboarded") from None
 
 
 def resolve(store_id: str | None) -> str:
