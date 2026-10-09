@@ -1,0 +1,13 @@
+{
+  "store_id": "nimbus-gear",
+  "name": "Nimbus Gear",
+  "blurb": "an online outdoor-gear store (tents, backpacks, sleeping bags)",
+  "tone": "friendly and practical",
+  "orders": [
+    ["NG-1001", "u-alice", "Nimbus Trail 2P tent", 329.00, "delivered", "2026-09-02"],
+    ["NG-1002", "u-alice", "Merino base layer", 89.00, "delivered", "2026-09-20"],
+    ["NG-1003", "u-alice", "Gas canister 4-pack", 24.00, "shipped", "2026-10-05"],
+    ["NG-2001", "u-bob", "Summit 45L backpack", 219.00, "delivered", "2026-08-14"],
+    ["NG-2002", "u-bob", "Down sleeping bag -5C", 279.00, "processing", "2026-10-07"]
+  ]
+}
