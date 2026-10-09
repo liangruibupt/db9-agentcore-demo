@@ -9,6 +9,7 @@ import json
 import os
 from contextlib import contextmanager
 from functools import lru_cache
+from pathlib import Path
 from typing import Iterator
 
 import psycopg
@@ -121,5 +122,52 @@ def bootstrap(conn: psycopg.Connection) -> None:
         conn.execute(stmt)
     for stmt in filter(None, (s.strip() for s in INDEXES.split(";"))):
         conn.execute(stmt)
-    for d in ("/kb", "/memories", "/runs", "/reports"):
+    for d in ("/config", "/kb", "/memories", "/runs", "/reports", "/sessions"):
         mkdirs(conn, d)
+
+
+# The whole RAG ingest is ONE statement inside the database:
+# list fs9 directory -> read file -> chunk -> embed -> insert. No S3, no Lambda, no pipeline.
+INGEST_SQL = """
+INSERT INTO kb_chunks (file_path, chunk_index, chunk_text, embedding)
+SELECT f.path, c.chunk_index, c.chunk_text, embedding(c.chunk_text)
+FROM extensions.fs9('/kb/') AS f
+CROSS JOIN LATERAL CHUNK_TEXT(
+    content       => extensions.fs9_read(f.path),
+    max_chars     => 600,
+    overlap_chars => 80,
+    title         => f.path
+) AS c
+WHERE f.type = 'file' AND f.path LIKE '%.md'
+"""
+
+
+def provision_store(conn: psycopg.Connection, store_dir: Path) -> dict:
+    """Turn an empty db9 database into one store's complete agent backend.
+
+    store_dir/store.json -> /config/store.json (brand config the agent reads at runtime)
+                            + orders rows
+    store_dir/kb/*.md    -> /kb/*.md in fs9 -> chunked + embedded in SQL
+    Idempotent: re-running replaces the KB and keeps existing orders.
+    """
+    cfg = json.loads((store_dir / "store.json").read_text())
+    bootstrap(conn)
+    conn.execute("SELECT extensions.fs9_write('/config/store.json', %s)",
+                 (json.dumps({k: v for k, v in cfg.items() if k != "orders"}, ensure_ascii=False),))
+    for md in sorted((store_dir / "kb").glob("*.md")):
+        conn.execute("SELECT extensions.fs9_write(%s, %s)", (f"/kb/{md.name}", md.read_text()))
+    conn.execute("DELETE FROM kb_chunks")
+    conn.execute(INGEST_SQL)
+    conn.cursor().executemany(
+        "INSERT INTO orders VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (order_id) DO NOTHING", cfg["orders"])
+    stats = conn.execute("SELECT (SELECT count(DISTINCT file_path) FROM kb_chunks) AS files, "
+                         "(SELECT count(*) FROM kb_chunks) AS chunks, "
+                         "(SELECT count(*) FROM orders) AS orders").fetchone()
+    return {"store_id": cfg["store_id"], "name": cfg["name"], **stats}
+
+
+def store_config(conn: psycopg.Connection) -> dict:
+    """The store's brand config lives in its own database (fs9), not in the agent code."""
+    if conn.execute("SELECT extensions.fs9_exists('/config/store.json') AS e").fetchone()["e"]:
+        return json.loads(conn.execute("SELECT extensions.fs9_read('/config/store.json') AS t").fetchone()["t"])
+    return {"name": "Nimbus Gear", "blurb": "an online outdoor-gear store", "tone": "friendly and practical"}

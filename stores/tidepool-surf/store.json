@@ -1,0 +1,10 @@
+{
+  "store_id": "tidepool-surf",
+  "name": "Tidepool Surf Co.",
+  "blurb": "a surf shop in Honolulu selling boards, wetsuits and rentals",
+  "tone": "laid-back and warm",
+  "orders": [
+    ["TS-77", "u-alice", "4/3 full wetsuit", 289.00, "delivered", "2026-09-30"],
+    ["TS-78", "u-dan", "7'2\" funboard", 649.00, "shipped", "2026-10-04"]
+  ]
+}

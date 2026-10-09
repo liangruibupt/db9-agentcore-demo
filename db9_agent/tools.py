@@ -30,21 +30,26 @@ def _slug(s: str, n: int = 40) -> str:
 class Tracer:
     """Append one JSON line per event to /runs/<session>/<run>.jsonl in fs9."""
 
-    def __init__(self, session_id: str, run_id: str):
+    def __init__(self, session_id: str, run_id: str, dsn: str | None = None):
+        self.dsn = dsn
         self.path = f"/runs/{_slug(session_id, 64)}/{run_id}.jsonl"
-        with connect() as c:
+        with connect(dsn) as c:
             mkdirs(c, self.path.rsplit("/", 1)[0])
 
     def log(self, event: str, **data) -> None:
         line = json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "event": event, **data},
                           ensure_ascii=False, default=str)
-        with connect() as c:
+        with connect(self.dsn) as c:
             # Leading/trailing newline: fs9_append writes bytes verbatim.
             c.execute("SELECT extensions.fs9_append(%s, %s)", (self.path, "\n" + line + "\n"))
 
 
-def build_tools(user_id: str, tracer: Tracer):
-    """Create tools bound to one user + run (closures keep tenant scoping out of the LLM's hands)."""
+def build_tools(user_id: str, tracer: Tracer, dsn: str | None = None):
+    """Create tools bound to one store database + user + run.
+
+    The closures pin both the store (dsn) and the customer (user_id), so the LLM can
+    never choose which tenant's database it talks to.
+    """
 
     def traced(name: str, args: dict, fn):
         t0 = time.time()
@@ -58,7 +63,7 @@ def build_tools(user_id: str, tracer: Tracer):
 
     @tool
     def search_knowledge(query: str, k: int = 4) -> str:
-        """Semantic search over the company knowledge base (policies, FAQs, product docs).
+        """Semantic search over this store's knowledge base (policies, FAQs, product docs).
 
         Args:
             query: natural-language question
@@ -71,7 +76,7 @@ def build_tools(user_id: str, tracer: Tracer):
                 "VEC_EMBED_COSINE_DISTANCE(embedding, {q}) AS dist "
                 "FROM kb_chunks ORDER BY VEC_EMBED_COSINE_DISTANCE(embedding, {q}) LIMIT {k}"
             ).format(q=literal(query), k=sql.Literal(max(1, min(int(k), 8))))
-            with connect() as c:
+            with connect(dsn) as c:
                 rows = c.execute(q).fetchall()
             return json.dumps([{"source": r["file_path"], "chunk": r["chunk_index"],
                                 "distance": round(float(r["dist"]), 4), "text": r["chunk_text"]}
@@ -89,7 +94,7 @@ def build_tools(user_id: str, tracer: Tracer):
         def run():
             path = f"/memories/{_slug(user_id)}/{int(time.time())}-{_slug(topic)}.md"
             body = f"---\nuser: {user_id}\ntopic: {topic}\ncreated: {datetime.now(timezone.utc).isoformat()}\n---\n{note}\n"
-            with connect() as c:
+            with connect(dsn) as c:
                 mkdirs(c, path.rsplit("/", 1)[0])
                 c.execute("SELECT extensions.fs9_write(%s, %s)", (path, body))           # context -> file
                 c.execute(                                                               # state -> table
@@ -109,7 +114,7 @@ def build_tools(user_id: str, tracer: Tracer):
             k: max memories to return
         """
         def run():
-            with connect() as c:
+            with connect(dsn) as c:
                 rows = c.execute(
                     "SELECT topic, summary, file_path, created_at, "
                     "embedding <=> embedding(%s) AS dist FROM memories "
@@ -134,7 +139,7 @@ def build_tools(user_id: str, tracer: Tracer):
             s = sql_query.strip().rstrip(";")
             if not re.match(r"(?is)^\s*(select|with)\b", s) or ";" in s:
                 return "ERROR: only a single SELECT/WITH statement is allowed"
-            with connect() as c:
+            with connect(dsn) as c:
                 with c.transaction():
                     c.execute("SET TRANSACTION READ ONLY")
                     rows = c.execute(s).fetchmany(50)
@@ -151,7 +156,7 @@ def build_tools(user_id: str, tracer: Tracer):
         """
         def run():
             path = f"/reports/{_slug(user_id)}/{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{_slug(title)}.md"
-            with connect() as c:
+            with connect(dsn) as c:
                 mkdirs(c, path.rsplit("/", 1)[0])
                 body = markdown if markdown.lstrip().startswith("#") else f"# {title}\n\n{markdown}"
                 c.execute("SELECT extensions.fs9_write(%s, %s)", (path, body.rstrip() + "\n"))

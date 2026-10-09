@@ -1,0 +1,11 @@
+{
+  "store_id": "peak-cycles",
+  "name": "Peak Cycles",
+  "blurb": "a specialist bicycle shop in Denver (road, gravel and e-bikes)",
+  "tone": "concise and technical",
+  "orders": [
+    ["PC-501", "u-alice", "Ridge GR2 gravel bike, size M", 2499.00, "delivered", "2026-09-28"],
+    ["PC-502", "u-alice", "Tubeless repair kit", 19.00, "delivered", "2026-09-28"],
+    ["PC-610", "u-carol", "Volt City e-bike", 3199.00, "processing", "2026-10-06"]
+  ]
+}
