@@ -17,6 +17,11 @@ columns, i.e. a pipeline written BEFORE you know the files), and giving an LLM D
 shared cluster is a blast-radius problem. Why not DynamoDB: no joins, aggregation,
 ad-hoc SQL, vectors or files at all.
 
+Honest caveat: for ONE agent analysing files inside ONE session, DuckDB running inside the
+AgentCore session's own microVM does this just as well. db9 only pulls ahead when the
+sandbox must be a network database shared by several processes / agents, or outlive the
+session (see scripts 07 and 08 for the workloads where that is the core requirement).
+
 Usage: python scripts/06_analyst_sandbox.py [--keep]
 """
 import csv
@@ -26,7 +31,6 @@ import os
 import pathlib
 import random
 import re
-import subprocess
 import sys
 import time
 import uuid
@@ -41,7 +45,7 @@ from strands import Agent, tool  # noqa: E402
 from strands.models import BedrockModel  # noqa: E402
 
 from db9_agent.db import connect, mkdirs  # noqa: E402
-from db9_agent.tenants import DB9, _db9, _with_password  # noqa: E402
+from db9_agent.provision import create_database, delete_database  # noqa: E402
 from db9_agent.tools import Tracer, new_run_id  # noqa: E402
 
 QUESTION = "我们店 9 月份的退货率比 8 月高了很多，帮我查清楚原因，量化影响，并给出建议。"
@@ -182,11 +186,9 @@ def main():
     keep = "--keep" in sys.argv
     job = f"job-{uuid.uuid4().hex[:6]}"
     print(f"{B}== 1. new sandbox database for this one question =={R}")
-    t0 = time.time()
-    created = _db9("create", "--name", f"sandbox-{job}", "--show-password")
-    dsn = _with_password(created["connection_string"],
-                         next(v for k, v in created.items() if "password" in k and isinstance(v, str) and v))
-    print(f"  db9 create sandbox-{job}: {time.time() - t0:.1f}s")
+    db = create_database(f"sandbox-{job}")
+    dsn = db["dsn"]
+    print(f"  db9 create sandbox-{job}: {db['seconds']}s")
     try:
         t1 = time.time()
         files = make_exports()
@@ -231,7 +233,7 @@ def main():
         if keep:
             print(f"\n  kept sandbox-{job} (delete with: db9 delete sandbox-{job} --yes)")
         else:
-            subprocess.run([DB9, "delete", f"sandbox-{job}", "--yes"], check=True, capture_output=True)
+            delete_database(f"sandbox-{job}")
             print(f"\n{B}== 4. job done: sandbox-{job} deleted (tables, files, traces) =={R}")
 
 
